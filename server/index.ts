@@ -1,7 +1,8 @@
+import pool, { initDB } from "./db.js";
+const db = pool;
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import db, { initDB } from "./db.js";
 import {
   generateChatResponse,
   extractAndSaveMemory,
@@ -22,9 +23,9 @@ app.use(express.json());
  */
 
 // 1. Agents API
-app.get("/api/agents", (req, res) => {
+app.get("/api/agents", async (req, res) => {
   try {
-    const agents = db.prepare("SELECT * FROM agents").all();
+    const agents = (await db.execute("SELECT * FROM agents") as any[])[0];
     const formatted = agents.map((a: any) => ({
       ...a,
       isCustom: Boolean(a.is_custom),
@@ -37,7 +38,7 @@ app.get("/api/agents", (req, res) => {
   }
 });
 
-app.post("/api/agents", (req, res) => {
+app.post("/api/agents", async (req, res) => {
   try {
     const { name, role, description, avatar, model, systemInstruction, temperature, capabilities } = req.body;
     if (!name || !role || !description || !systemInstruction) {
@@ -45,22 +46,12 @@ app.post("/api/agents", (req, res) => {
     }
 
     const id = "agent_" + Math.random().toString(36).substring(2, 11);
-    db.prepare(`
+    await db.execute(`
       INSERT INTO agents (id, name, role, description, avatar, model, system_instruction, temperature, capabilities, is_custom)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
-    `).run(
-      id,
-      name,
-      role,
-      description,
-      avatar || "User",
-      model || "gemini-3.5-flash",
-      systemInstruction,
-      temperature ?? 0.7,
-      JSON.stringify(capabilities || []),
-    );
+    `, [id, name, role, description, avatar || "User", model || "gemini-3.5-flash", systemInstruction, temperature ?? 0.7, JSON.stringify(capabilities || [])]);
 
-    const created = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as any;
+    const created = (await db.execute("SELECT * FROM agents WHERE id = ?", [id]) as any[])[0][0] as any;
     res.status(201).json({
       ...created,
       isCustom: true,
@@ -72,11 +63,11 @@ app.post("/api/agents", (req, res) => {
   }
 });
 
-app.delete("/api/agents/:id", (req, res) => {
+app.delete("/api/agents/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const result = db.prepare("DELETE FROM agents WHERE id = ? AND is_custom = 1").run(id);
-    if (result.changes === 0) {
+    const result = await db.execute("DELETE FROM agents WHERE id = ? AND is_custom = 1", [id]);
+    if ((result as any).affectedRows === 0) {
       return res.status(404).json({ error: "Custom agent not found or cannot delete system agent." });
     }
     res.json({ success: true });
@@ -86,9 +77,9 @@ app.delete("/api/agents/:id", (req, res) => {
 });
 
 // 2. Chat Sessions API
-app.get("/api/sessions", (req, res) => {
+app.get("/api/sessions", async (req, res) => {
   try {
-    const sessions = db.prepare("SELECT * FROM sessions ORDER BY updated_at DESC").all();
+    const sessions = (await db.execute("SELECT * FROM sessions ORDER BY updated_at DESC") as any[])[0];
     const formatted = sessions.map((s: any) => ({
       id: s.id,
       title: s.title,
@@ -102,7 +93,7 @@ app.get("/api/sessions", (req, res) => {
   }
 });
 
-app.post("/api/sessions", (req, res) => {
+app.post("/api/sessions", async (req, res) => {
   try {
     const { title, agentId } = req.body;
     if (!title || !agentId) {
@@ -110,10 +101,10 @@ app.post("/api/sessions", (req, res) => {
     }
     const id = "session_" + Math.random().toString(36).substring(2, 11);
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.execute(`
       INSERT INTO sessions (id, title, agent_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(id, title, agentId, now, now);
+    `, [id, title, agentId, now, now]);
 
     res.status(201).json({ id, title, agentId, createdAt: now, updatedAt: now });
   } catch (err: any) {
@@ -121,10 +112,10 @@ app.post("/api/sessions", (req, res) => {
   }
 });
 
-app.delete("/api/sessions/:id", (req, res) => {
+app.delete("/api/sessions/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    await db.execute("DELETE FROM sessions WHERE id = ?", [id]);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -132,10 +123,10 @@ app.delete("/api/sessions/:id", (req, res) => {
 });
 
 // 3. Chat Messages API
-app.get("/api/sessions/:sessionId/messages", (req, res) => {
+app.get("/api/sessions/:sessionId/messages", async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const messages = db.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC").all(sessionId);
+    const messages = (await db.execute("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC", [sessionId]) as any[])[0];
     const formatted = messages.map((m: any) => {
       // Base message fields
       const msg: any = {
@@ -255,7 +246,7 @@ app.get("/api/sessions/:sessionId/messages", (req, res) => {
 });
 
 // --- INTERACTIVE ENTERPRISE DEMO SEEDING API ---
-app.post("/api/demo/seed", (req, res) => {
+app.post("/api/demo/seed", async (req, res) => {
   try {
     const { scenario } = req.body;
     if (!scenario) {
@@ -266,7 +257,7 @@ app.post("/api/demo/seed", (req, res) => {
     const sessionPrefix = `demo_scenario_${scenarioNum}`;
     
     // 1. Delete any existing demo session for this scenario
-    db.prepare("DELETE FROM sessions WHERE id LIKE ?").run(`${sessionPrefix}%`);
+    await db.execute("DELETE FROM sessions WHERE id LIKE ?", [`${sessionPrefix}%`]);
     
     // 2. Identify agent to use
     let agentId = "architect";
@@ -285,10 +276,10 @@ app.post("/api/demo/seed", (req, res) => {
     if (scenarioNum === 6) sessionTitle = "Scenario 6: End-to-End Cascade Flow Compliance Execution";
 
     // Create Session
-    db.prepare(`
+    await db.execute(`
       INSERT INTO sessions (id, title, agent_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
-    `).run(sessionId, sessionTitle, agentId, now, now);
+    `, [sessionId, sessionTitle, agentId, now, now]);
 
     const userMsgId = `demo_user_${scenarioNum}_${Math.random().toString(36).substring(2, 7)}`;
     const assistantMsgId = `demo_assist_${scenarioNum}_${Math.random().toString(36).substring(2, 7)}`;
@@ -326,15 +317,15 @@ No syntactic issues or runtime memory leaks were identified. The controller is r
 
 *Note: There are currently zero enterprise guidelines, rules, or custom compliance memories in the brain trust. The audit was conducted using generic public Node.js presets.*`;
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'user', ?, ?)
-      `).run(userMsgId, sessionId, prompt, now);
+      `, [userMsgId, sessionId, prompt, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'assistant', ?, ?)
-      `).run(assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString());
+      `, [assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString()]);
 
     } else if (scenarioNum === 2) {
       // Scenario 2: Fifth interaction. Standard memories are active. Output rejects and refactors.
@@ -343,18 +334,18 @@ No syntactic issues or runtime memory leaks were identified. The controller is r
       const memId2 = `demo_mem_retry_${Math.random().toString(36).substring(2, 7)}`;
       
       // Delete duplicates first to avoid primary key collisions
-      db.prepare("DELETE FROM memories WHERE content LIKE ?").run("%Redis-based token-bucket rate limiting%");
-      db.prepare("DELETE FROM memories WHERE content LIKE ?").run("%retryTransaction query transactional wrapper%");
+      await db.execute("DELETE FROM memories WHERE content LIKE ?", ["%Redis-based token-bucket rate limiting%"]);
+      await db.execute("DELETE FROM memories WHERE content LIKE ?", ["%retryTransaction query transactional wrapper%"]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
         VALUES (?, 'Compliance Standard: All checkout or payment handlers MUST use Redis-based token-bucket rate limiting.', 'instruction', ?, 0.98, 'architect')
-      `).run(memId1, now);
+      `, [memId1, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
         VALUES (?, 'Compliance Standard: Checkout database inserts must wrap query executions inside our retryTransaction query transactional wrapper.', 'instruction', ?, 0.95, 'architect')
-      `).run(memId2, now);
+      `, [memId2, now]);
 
       const prompt = `Please review this Express controller for architectural compliance:
 
@@ -428,15 +419,15 @@ app.post('/api/v1/checkout', rateLimiter({ limit: 5, window: '60s' }), async (re
 **Aether Memory Influence:**
 Recalled memories dynamically injected Redis and retryTransaction standards. Compliance audit accuracy improved by 100%.`;
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'user', ?, ?)
-      `).run(userMsgId, sessionId, prompt, now);
+      `, [userMsgId, sessionId, prompt, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, thinking, created_at)
         VALUES (?, ?, 'assistant', ?, ?, ?)
-      `).run(assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString());
+      `, [assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString()]);
 
     } else if (scenarioNum === 3) {
       // Scenario 3: Cheap model routing
@@ -458,15 +449,15 @@ is completely clean. The \`count\` variable is correctly scoped inside the closu
 * **Cost:** $0.00001 (Bypassed expensive reasoning engines, saving 98.4%)
 * **Latency:** 0.18s`;
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'user', ?, ?)
-      `).run(userMsgId, sessionId, prompt, now);
+      `, [userMsgId, sessionId, prompt, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'assistant', ?, ?)
-      `).run(assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString());
+      `, [assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString()]);
 
     } else if (scenarioNum === 4) {
       // Scenario 4: Escalation
@@ -497,25 +488,25 @@ const iterations = 600000; // Updated to SOC2 guidelines
 * **Latency:** 2.94s (Heavy logic compilation).
 * **Cost:** $0.00340. Priority budget allocation granted.`;
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'user', ?, ?)
-      `).run(userMsgId, sessionId, prompt, now);
+      `, [userMsgId, sessionId, prompt, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, thinking, created_at)
         VALUES (?, ?, 'assistant', ?, ?, ?)
-      `).run(assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString());
+      `, [assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString()]);
 
     } else if (scenarioNum === 5) {
       // Scenario 5: Memory affecting routing
       const memId = `demo_mem_drizzle_${Math.random().toString(36).substring(2, 7)}`;
-      db.prepare("DELETE FROM memories WHERE content LIKE ?").run("%prefers Drizzle ORM%");
+      await db.execute("DELETE FROM memories WHERE content LIKE ?", ["%prefers Drizzle ORM%"]);
       
-      db.prepare(`
+      await db.execute(`
         INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
         VALUES (?, 'Workspace Rule: The team strictly prefers Drizzle ORM over Prisma ORM for relational schemas due to cold start latencies.', 'preference', ?, 0.99, 'architect')
-      `).run(memId, now);
+      `, [memId, now]);
 
       const prompt = "Refactor this database order table definition for PostgreSQL compliance: `model Order { id Int @id; status String; created DateTime }` ";
       const thinking = `- Check database preferences in hindsight memories.
@@ -543,15 +534,15 @@ export const orders = pgTable('orders', {
 * **Avoided Path:** Standard Prisma schema output (Bypassed due to recalled engineering rule).
 * **Drizzle Standard Applied:** Automatically mapped types to Drizzle.`;
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at)
         VALUES (?, ?, 'user', ?, ?)
-      `).run(userMsgId, sessionId, prompt, now);
+      `, [userMsgId, sessionId, prompt, now]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, thinking, created_at)
         VALUES (?, ?, 'assistant', ?, ?, ?)
-      `).run(assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString());
+      `, [assistantMsgId, sessionId, response, thinking, new Date(Date.now() + 1000).toISOString()]);
 
     } else if (scenarioNum === 6) {
       // Scenario 6: CascadeFlow Run Seeding
@@ -568,15 +559,15 @@ The transactional pool allocation has been restructured to handle database clust
 
       const cascadeRunId = `cascade_demo_${Math.random().toString(36).substring(2, 7)}`;
       
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at, cascade_flow_id)
         VALUES (?, ?, 'user', ?, ?, ?)
-      `).run(userMsgId, sessionId, prompt, now, cascadeRunId);
+      `, [userMsgId, sessionId, prompt, now, cascadeRunId]);
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at, cascade_flow_id)
         VALUES (?, ?, 'assistant', ?, ?, ?)
-      `).run(assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString(), cascadeRunId);
+      `, [assistantMsgId, sessionId, response, new Date(Date.now() + 1000).toISOString(), cascadeRunId]);
 
       // Save CascadeFlow Run steps in database
       const steps = [
@@ -586,10 +577,10 @@ The transactional pool allocation has been restructured to handle database clust
         { id: "refinement", label: "Refinement & Alignment", description: "Polishing code for compliance tags.", status: "completed", output: "Pool optimizer polished successfully.", duration: 410 }
       ];
 
-      db.prepare(`
+      await db.execute(`
         INSERT INTO cascade_runs (id, prompt, agent_id, status, created_at, steps)
         VALUES (?, ?, ?, 'completed', ?, ?)
-      `).run(cascadeRunId, prompt, agentId, now, JSON.stringify(steps));
+      `, [cascadeRunId, prompt, agentId, now, JSON.stringify(steps)]);
     }
 
     res.status(201).json({ success: true, sessionId });
@@ -612,13 +603,13 @@ app.post("/api/chat/send", async (req, res) => {
     const userMessageId = "msg_" + Math.random().toString(36).substring(2, 11);
 
     // Save user message to database
-    db.prepare(`
+    await db.execute(`
       INSERT INTO messages (id, session_id, role, content, created_at)
       VALUES (?, ?, 'user', ?, ?)
-    `).run(userMessageId, sessionId, message, now);
+    `, [userMessageId, sessionId, message, now]);
 
     // Update session timestamp
-    db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now, sessionId);
+    await db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", [now, sessionId]);
 
     // If cascadeflow execution is selected:
     if (useCascadeFlow) {
@@ -627,10 +618,10 @@ app.post("/api/chat/send", async (req, res) => {
       const assistantNow = new Date().toISOString();
 
       // Save final cascade output as the assistant message linked to cascadeFlowId
-      db.prepare(`
+      await db.execute(`
         INSERT INTO messages (id, session_id, role, content, created_at, cascade_flow_id)
         VALUES (?, ?, 'assistant', ?, ?, ?)
-      `).run(assistantMessageId, sessionId, cascadeResult.finalOutput, assistantNow, cascadeResult.runId);
+      `, [assistantMessageId, sessionId, cascadeResult.finalOutput, assistantNow, cascadeResult.runId]);
 
       // Extract and save memory in background
       extractAndSaveMemory(agentId, message, cascadeResult.finalOutput);
@@ -674,17 +665,10 @@ app.post("/api/chat/send", async (req, res) => {
     const assistantNow = new Date().toISOString();
 
     // Save assistant message to database
-    db.prepare(`
+    await db.execute(`
       INSERT INTO messages (id, session_id, role, content, thinking, created_at, sources)
       VALUES (?, ?, 'assistant', ?, ?, ?, ?)
-    `).run(
-      assistantMessageId,
-      sessionId,
-      result.content,
-      result.thinking || null,
-      assistantNow,
-      result.sources ? JSON.stringify(result.sources) : null
-    );
+    `, [assistantMessageId, sessionId, result.content, result.thinking || null, assistantNow, result.sources ? JSON.stringify(result.sources) : null]);
 
     // Extract and save cognitive hindsight memory in the background
     extractAndSaveMemory(agentId, message, result.content);
@@ -714,9 +698,9 @@ app.post("/api/chat/send", async (req, res) => {
 });
 
 // 5. Memories API
-app.get("/api/memories", (req, res) => {
+app.get("/api/memories", async (req, res) => {
   try {
-    const memories = db.prepare("SELECT * FROM memories ORDER BY created_at DESC").all();
+    const memories = (await db.execute("SELECT * FROM memories ORDER BY created_at DESC") as any[])[0];
     const formatted = memories.map((m: any) => ({
       id: m.id,
       content: m.content,
@@ -731,7 +715,7 @@ app.get("/api/memories", (req, res) => {
   }
 });
 
-app.post("/api/memories", (req, res) => {
+app.post("/api/memories", async (req, res) => {
   try {
     const { content, category, agentId } = req.body;
     if (!content || !category) {
@@ -740,10 +724,10 @@ app.post("/api/memories", (req, res) => {
 
     const id = "mem_" + Math.random().toString(36).substring(2, 11);
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.execute(`
       INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
       VALUES (?, ?, ?, ?, 1.0, ?)
-    `).run(id, content, category, now, agentId || "manual");
+    `, [id, content, category, now, agentId || "manual"]);
 
     res.status(201).json({ id, content, category, createdAt: now, confidence: 1.0, agentId: agentId || "manual" });
   } catch (err: any) {
@@ -751,29 +735,29 @@ app.post("/api/memories", (req, res) => {
   }
 });
 
-app.delete("/api/memories/:id", (req, res) => {
+app.delete("/api/memories/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    db.prepare("DELETE FROM memories WHERE id = ?").run(id);
+    await db.execute("DELETE FROM memories WHERE id = ?", [id]);
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.put("/api/memories/:id", (req, res) => {
+app.put("/api/memories/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const { content, category, confidence } = req.body;
-    db.prepare(`
+    await db.execute(`
       UPDATE memories
       SET content = COALESCE(?, content),
           category = COALESCE(?, category),
           confidence = COALESCE(?, confidence)
       WHERE id = ?
-    `).run(content, category, confidence, id);
+    `, [content, category, confidence, id]);
 
-    const updated = db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as any;
+    const updated = (await db.execute("SELECT * FROM memories WHERE id = ?", [id]) as any[])[0][0] as any;
     if (!updated) {
       return res.status(404).json({ error: "Memory not found" });
     }
@@ -792,9 +776,9 @@ app.put("/api/memories/:id", (req, res) => {
 });
 
 // 6. CascadeFlow Runs API
-app.get("/api/cascade-runs", (req, res) => {
+app.get("/api/cascade-runs", async (req, res) => {
   try {
-    const runs = db.prepare("SELECT * FROM cascade_runs ORDER BY created_at DESC").all();
+    const runs = (await db.execute("SELECT * FROM cascade_runs ORDER BY created_at DESC") as any[])[0];
     const formatted = runs.map((r: any) => ({
       id: r.id,
       prompt: r.prompt,
@@ -809,9 +793,9 @@ app.get("/api/cascade-runs", (req, res) => {
   }
 });
 
-app.get("/api/cascade-runs/:id", (req, res) => {
+app.get("/api/cascade-runs/:id", async (req, res) => {
   try {
-    const run = db.prepare("SELECT * FROM cascade_runs WHERE id = ?").get(req.params.id) as any;
+    const run = (await db.execute("SELECT * FROM cascade_runs WHERE id = ?", [req.params.id]) as any[])[0][0] as any;
     if (!run) {
       return res.status(404).json({ error: "Run not found." });
     }

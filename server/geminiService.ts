@@ -39,7 +39,8 @@ export async function generateChatResponse({
   enableSearch?: boolean;
 }) {
   // 1. Fetch Agent info
-  const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as {
+  const [agentRows] = await db.execute("SELECT * FROM agents WHERE id = ?", [agentId]);
+  const agent = (agentRows as any[])[0] as {
     id: string;
     name: string;
     role: string;
@@ -56,7 +57,8 @@ export async function generateChatResponse({
   }
 
   // 2. Fetch Hindsight Memories to inject
-  const memories = db.prepare("SELECT content, category FROM memories").all() as {
+  const [memoriesRows] = await db.execute("SELECT content, category FROM memories");
+  const memories = memoriesRows as {
     content: string;
     category: string;
   }[];
@@ -77,12 +79,13 @@ export async function generateChatResponse({
   }
 
   // 3. Fetch past session messages (up to last 15 messages)
-  const pastMessages = db.prepare(`
+  const [pastMessagesRows] = await db.execute(`
     SELECT role, content, thinking FROM messages
     WHERE session_id = ?
     ORDER BY created_at ASC
     LIMIT 15
-  `).all(sessionId) as { role: string; content: string; thinking: string | null }[];
+  `, [sessionId]);
+  const pastMessages = pastMessagesRows as { role: string; content: string; thinking: string | null }[];
 
   // 4. Construct content blocks for Gemini
   const contents: any[] = [];
@@ -262,18 +265,16 @@ Output ONLY valid JSON. No markdown backticks or commentary.`;
     }[];
 
     if (Array.isArray(newMemories) && newMemories.length > 0) {
-      const insertMem = db.prepare(`
-        INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `);
-
-      newMemories.forEach((mem) => {
+      for (const mem of newMemories) {
         if (mem.confidence >= 0.5) {
           const id = "mem_" + Math.random().toString(36).substring(2, 11);
           const now = new Date().toISOString();
-          insertMem.run(id, mem.content, mem.category, now, mem.confidence, agentId);
+          await db.execute(`
+            INSERT INTO memories (id, content, category, created_at, confidence, agent_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, [id, mem.content, mem.category, now, mem.confidence, agentId]);
         }
-      });
+      }
     }
   } catch (err) {
     console.info("[Background Sync] Cognitive memory index updated to current state.");
@@ -540,13 +541,13 @@ export async function runCascadeFlow({
   ];
 
   // Save run to DB
-  db.prepare(`
+  await db.execute(`
     INSERT INTO cascade_runs (id, prompt, agent_id, status, created_at, steps)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(runId, prompt, agentId, "running", now, JSON.stringify(steps));
+  `, [runId, prompt, agentId, "running", now, JSON.stringify(steps)]);
 
   // Helper to update steps and save to DB
-  const updateStepStatus = (
+  const updateStepStatus = async (
     stepId: string,
     status: "active" | "completed" | "failed",
     output?: string,
@@ -558,10 +559,10 @@ export async function runCascadeFlow({
       if (output) steps[idx].output = output;
       if (duration) steps[idx].duration = duration;
     }
-    db.prepare("UPDATE cascade_runs SET steps = ? WHERE id = ?").run(
+    await db.execute("UPDATE cascade_runs SET steps = ? WHERE id = ?", [
       JSON.stringify(steps),
       runId
-    );
+    ]);
   };
 
   try {
@@ -569,30 +570,32 @@ export async function runCascadeFlow({
 
     // 1. Planning Step
     const t0 = Date.now();
-    updateStepStatus("planning", "active");
+    await updateStepStatus("planning", "active");
     const planningPrompt = `Analyze this prompt and plan a multi-turn solution: "${prompt}"\nCreate a brief 2-bullet conceptual strategy.`;
     const planningRes = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: planningPrompt,
     });
     const planText = planningRes.text?.trim() || "Strategic intent formulated.";
-    updateStepStatus("planning", "completed", planText, Date.now() - t0);
+    await updateStepStatus("planning", "completed", planText, Date.now() - t0);
 
     // 2. Retrieval Step
     const t1 = Date.now();
-    updateStepStatus("retrieval", "active");
+    await updateStepStatus("retrieval", "active");
     // Fetch memories if any
-    const memories = db.prepare("SELECT content FROM memories").all() as { content: string }[];
+    const [memRows] = await db.execute("SELECT content FROM memories");
+    const memories = memRows as { content: string }[];
     const retrievedContext = memories.length > 0 
       ? `Retrieved ${memories.length} relevant hindsight preferences.` 
       : "No active hindsight preferences located. Activating web retrieval index.";
-    updateStepStatus("retrieval", "completed", retrievedContext, Date.now() - t1);
+    await updateStepStatus("retrieval", "completed", retrievedContext, Date.now() - t1);
 
     // 3. Execution (Thinking) Step
     const t2 = Date.now();
-    updateStepStatus("execution", "active");
+    await updateStepStatus("execution", "active");
     // Get agent instruction
-    const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as any;
+    const [agentRows] = await db.execute("SELECT * FROM agents WHERE id = ?", [agentId]);
+    const agent = (agentRows as any[])[0] as any;
     const finalSystem = `${agent.system_instruction}\nYou are executing a CascadeFlow step. Build an ultra-comprehensive design draft. Write your deep logic in a <thinking>...</thinking> block before your response.`;
     
     const executionRes = await ai.models.generateContent({
@@ -610,21 +613,21 @@ export async function runCascadeFlow({
     if (thinkingMatch) {
       cleanDraft = rawDraft.replace(thinkingRegex, "").trim();
     }
-    updateStepStatus("execution", "completed", `Draft generated. Length: ${cleanDraft.length} chars.`, Date.now() - t2);
+    await updateStepStatus("execution", "completed", `Draft generated. Length: ${cleanDraft.length} chars.`, Date.now() - t2);
 
     // 4. Refinement Step
     const t3 = Date.now();
-    updateStepStatus("refinement", "active");
+    await updateStepStatus("refinement", "active");
     const refinementPrompt = `Refine this response draft to be professional, elegant, and perfectly formatted. Remove any markdown artifacts or repetition.\n\nDraft: ${cleanDraft}`;
     const refinementRes = await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: refinementPrompt,
     });
     const finalOutput = refinementRes.text?.trim() || cleanDraft;
-    updateStepStatus("refinement", "completed", "Output polished and compiled successfully.", Date.now() - t3);
+    await updateStepStatus("refinement", "completed", "Output polished and compiled successfully.", Date.now() - t3);
 
     // Update main status to completed
-    db.prepare("UPDATE cascade_runs SET status = 'completed' WHERE id = ?").run(runId);
+    await db.execute("UPDATE cascade_runs SET status = 'completed' WHERE id = ?", [runId]);
 
     return {
       runId,
@@ -654,10 +657,10 @@ export async function runCascadeFlow({
     const simulatedResult = getSimulatedResponse(agentId, prompt, true);
     
     // Save updated steps and final completed status to database
-    db.prepare("UPDATE cascade_runs SET steps = ?, status = 'completed' WHERE id = ?").run(
+    await db.execute("UPDATE cascade_runs SET steps = ?, status = 'completed' WHERE id = ?", [
       JSON.stringify(steps),
       runId
-    );
+    ]);
 
     return {
       runId,

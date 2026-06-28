@@ -1,89 +1,99 @@
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+import mysql from "mysql2/promise";
+import dotenv from "dotenv";
 
-const DB_PATH = path.join(process.cwd(), "database.db");
+dotenv.config();
 
-// Establish the SQLite Connection
-const db = new Database(DB_PATH);
+const DATABASE_URL = process.env.DATABASE_URL;
 
-// Enable foreign key support
-db.pragma("foreign_keys = ON");
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL is not set in the environment.");
+  process.exit(1);
+}
+
+// Establish the MySQL Connection Pool
+const pool = mysql.createPool({
+  uri: DATABASE_URL,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+});
 
 // Bootstrap tables
-export function initDB() {
+export async function initDB() {
   // Create Agents table
-  db.prepare(`
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      role TEXT NOT NULL,
+      id VARCHAR(255) PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      role VARCHAR(255) NOT NULL,
       description TEXT NOT NULL,
-      avatar TEXT NOT NULL,
-      model TEXT NOT NULL,
+      avatar VARCHAR(255) NOT NULL,
+      model VARCHAR(255) NOT NULL,
       system_instruction TEXT NOT NULL,
-      temperature REAL DEFAULT 0.7,
-      capabilities TEXT NOT NULL, -- JSON array
-      is_custom INTEGER DEFAULT 0
+      temperature FLOAT DEFAULT 0.7,
+      capabilities TEXT NOT NULL,
+      is_custom TINYINT DEFAULT 0
     )
-  `).run();
+  `);
 
   // Create Chat Sessions table
-  db.prepare(`
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      agent_id TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
+      id VARCHAR(255) PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      agent_id VARCHAR(255) NOT NULL,
+      created_at VARCHAR(255) NOT NULL,
+      updated_at VARCHAR(255) NOT NULL,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     )
-  `).run();
+  `);
 
   // Create Chat Messages table
-  db.prepare(`
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      thinking TEXT,
-      created_at TEXT NOT NULL,
-      sources TEXT, -- JSON array of grounding sources
-      cascade_flow_id TEXT, -- optional reference
+      id VARCHAR(255) PRIMARY KEY,
+      session_id VARCHAR(255) NOT NULL,
+      role VARCHAR(255) NOT NULL,
+      content LONGTEXT NOT NULL,
+      thinking LONGTEXT,
+      created_at VARCHAR(255) NOT NULL,
+      sources TEXT,
+      cascade_flow_id VARCHAR(255),
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     )
-  `).run();
+  `);
 
   // Create Memories (Hindsight Memory) table
-  db.prepare(`
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS memories (
-      id TEXT PRIMARY KEY,
+      id VARCHAR(255) PRIMARY KEY,
       content TEXT NOT NULL,
-      category TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      confidence REAL DEFAULT 1.0,
-      agent_id TEXT NOT NULL,
+      category VARCHAR(255) NOT NULL,
+      created_at VARCHAR(255) NOT NULL,
+      confidence FLOAT DEFAULT 1.0,
+      agent_id VARCHAR(255) NOT NULL,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     )
-  `).run();
+  `);
 
   // Create Cascade Flow Runs table
-  db.prepare(`
+  await pool.execute(`
     CREATE TABLE IF NOT EXISTS cascade_runs (
-      id TEXT PRIMARY KEY,
+      id VARCHAR(255) PRIMARY KEY,
       prompt TEXT NOT NULL,
-      agent_id TEXT NOT NULL,
-      status TEXT NOT NULL, -- pending, running, completed, failed
-      created_at TEXT NOT NULL,
-      steps TEXT NOT NULL, -- JSON array of CascadeStep
+      agent_id VARCHAR(255) NOT NULL,
+      status VARCHAR(255) NOT NULL,
+      created_at VARCHAR(255) NOT NULL,
+      steps LONGTEXT NOT NULL,
       FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
     )
-  `).run();
+  `);
 
   // Seed default agents if none exist
-  const count = db.prepare("SELECT COUNT(*) as count FROM agents").get() as { count: number };
-  if (count.count === 0) {
+  const [rows] = await pool.execute("SELECT COUNT(*) as count FROM agents");
+  const count = (rows as any[])[0].count;
+  
+  if (count === 0) {
     const defaultAgents = [
       {
         id: "architect",
@@ -135,13 +145,13 @@ export function initDB() {
       }
     ];
 
-    const insertAgent = db.prepare(`
+    const insertQuery = `
       INSERT INTO agents (id, name, role, description, avatar, model, system_instruction, temperature, capabilities, is_custom)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    `;
 
     for (const agent of defaultAgents) {
-      insertAgent.run(
+      await pool.execute(insertQuery, [
         agent.id,
         agent.name,
         agent.role,
@@ -152,16 +162,16 @@ export function initDB() {
         agent.temperature,
         agent.capabilities,
         agent.is_custom
-      );
+      ]);
     }
   }
 
-  // Migrate existing agent models to gemini-2.5-flash to bypass quota/high-demand issues
-  db.prepare(`
+  // Migrate existing agent models to gemini-2.5-flash
+  await pool.execute(`
     UPDATE agents 
     SET model = 'gemini-2.5-flash' 
     WHERE model IN ('gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.1-flash-lite')
-  `).run();
+  `);
 }
 
-export default db;
+export default pool;
