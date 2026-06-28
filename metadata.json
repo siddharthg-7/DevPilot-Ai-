@@ -1,0 +1,6 @@
+{
+  "name": "Aether Agent Platform",
+  "description": "An enterprise-grade AI Agent orchestrator featuring cognitive hindsight memory, cascadeflow runtimes, and real-time multi-agent intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
